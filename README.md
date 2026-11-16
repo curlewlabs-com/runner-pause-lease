@@ -247,6 +247,10 @@ a green run is not proof that every host is back; those two say so.
   it captures the host's runners as they are, stripped, so its own restore
   puts back nothing the broken lease held. A reply from the issues endpoint
   that is not a list of issues is read as no leases at all.
+- **A runner whose labels come back in an unexpected shape.** A runner entry
+  whose `labels` is not a list of objects is read as carrying no labels. A
+  pause captures nothing for it, and the pass that checks the strip can count
+  it as clean while its labels are still on.
 - **An extended window's issue text keeps the first deadline.** The hidden
   marker, which the reconciler reads, has the new one.
 - **One lease failing stops the rest.** An error writing or closing one lease
