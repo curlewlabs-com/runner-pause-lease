@@ -136,9 +136,12 @@ runner-pause-lease --repo OWNER/NAME --host-label-prefix host: reconcile
   hours. Pausing a host that is already paused extends its window, but never
   past twelve hours from when that window first opened. A pause after a
   window ends, whether by expiry or by the cap, restores the host and opens a
-  new window.
-- **`resume --host H...`** restores the named hosts now, then reconciles the
-  rest.
+  new window. It refuses a host whose earlier lease still owes its restore,
+  and refuses every host while any lease issue will not parse, since that
+  lease could be the host's; either way it changes nothing.
+- **`resume --host H...`** closes the named hosts' lease issues, restores
+  them, then reconciles the rest. A restore that fails is retried by the next
+  reconcile, because a closed issue that keeps its label is a resume request.
 - **`status --host H`** exits 3 while the host is inside a live window. When
   it is not, it exits 0, or 1 if some lease issue cannot be read, since that
   lease could be this host's.
@@ -217,45 +220,11 @@ runner instead.
   the window.
 - **A lease whose marker will not parse cannot be restored automatically.**
   Nothing can know what to put back, so `reconcile` and `status` report it and
-  exit non-zero, rather than skipping it.
+  exit non-zero, rather than skipping it, and `pause` refuses until it is
+  repaired: put the host's labels back by hand, then fix the marker or take the
+  `ci-quiet` label off the issue.
 - **It does not serialize itself.** Run every invocation under one concurrency
   group, as in the workflow above, or hold your own lock around it.
-
-## Known issues
-
-Each of these needs a GitHub call to fail, a lease issue edited by hand, or a
-setup outside the one above. Two of them end in a run that reports success, so
-a green run is not proof that every host is back; those two say so.
-
-- **An issue credential that cannot set labels.** GitHub creates an issue
-  without its labels, and without an error, when the credential creating it
-  lacks push access. The pause then strips the host under a lease no reconcile
-  can find, and every run still succeeds. The workflow token in the example can
-  set labels.
-- **A resume whose restore partly fails.** The lease stays open with its
-  original expiry. A later reconcile does not retry the restore until that
-  expiry, and if the strip was never confirmed, it strips the runners the
-  resume had put back.
-- **A pause of a host whose last restore failed.** The pause does not wait for
-  that restore to succeed. It can capture the partly restored runners, or
-  extend the ended lease, and the older lease's later restore can make the
-  host routable during the new window.
-- **More than 100 leases.** Only the first page of labelled issues is read, so
-  leases beyond it are not reconciled, and the run still succeeds.
-- **A lease marker edited into something unreadable.** `reconcile` and
-  `status` report it and exit non-zero, but a pause of that host goes ahead:
-  it captures the host's runners as they are, stripped, so its own restore
-  puts back nothing the broken lease held. A reply from the issues endpoint
-  that is not a list of issues is read as no leases at all.
-- **A runner whose labels come back in an unexpected shape.** A runner entry
-  whose `labels` is not a list of objects is read as carrying no labels. A
-  pause captures nothing for it, and the pass that checks the strip can count
-  it as clean while its labels are still on.
-- **An extended window's issue text keeps the first deadline.** The hidden
-  marker, which the reconciler reads, has the new one.
-- **One lease failing stops the rest.** An error writing or closing one lease
-  issue ends that reconcile before it reaches the leases after it, and a
-  failure that persists does so on every run.
 
 ## Requirements
 

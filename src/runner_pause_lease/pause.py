@@ -191,14 +191,25 @@ def tracked_leases(fleet: Fleet) -> tuple[list[Lease], int]:
     the API's record of what the host carried. An issue whose marker will not
     parse is counted, not skipped: it may name a host stripped with no
     readable record, which must never pass quietly.
+
+    Every page is read: nothing bounds how many issues carry the label. A
+    reply that is not a list of pages of issues raises rather than reading as
+    no leases, which would let every check after it pass.
     """
-    document = json.loads(
-        issue_api([f"repos/{fleet.repo}/issues?{LEASE_QUERY}"], method="GET")
+    pages = json.loads(
+        issue_api(
+            [f"repos/{fleet.repo}/issues?{LEASE_QUERY}", "--paginate", "--slurp"],
+            method="GET",
+        )
     )
+    if not isinstance(pages, list) or not all(isinstance(p, list) for p in pages):
+        raise TypeError("unexpected shape from the issues endpoint: not issue pages")
     leases: list[Lease] = []
     unreadable = 0
-    for entry in document if isinstance(document, list) else []:
+    for entry in (entry for page in pages for entry in page):
         if not isinstance(entry, dict):
+            print("a lease issue entry is not an object", file=sys.stderr)
+            unreadable += 1
             continue
         number, body = entry.get("number"), entry.get("body")
         if not isinstance(number, int) or not isinstance(body, str):
@@ -241,8 +252,7 @@ def write_lease(fleet: Fleet, lease: Lease) -> int:
         raise RuntimeError(f"lease marker is not round-trippable: {marker!r}")
     body = (
         f"{marker}\n\n"
-        f"CI job routing to `{lease.host}` is paused until "
-        f"{format_time(lease.expires_at)}.\n\n"
+        f"{deadline_sentence(lease.host, lease.expires_at)}\n\n"
         "Jobs already running when the window opened were left alone and drain "
         "normally. At expiry the next reconcile restores the labels and closes "
         "this issue. To end it early, close this issue; the next reconcile "
@@ -268,11 +278,28 @@ def write_lease(fleet: Fleet, lease: Lease) -> int:
     number = created.get("number") if isinstance(created, dict) else None
     if not isinstance(number, int):
         raise TypeError("issue create returned no number; nothing was stripped")
+    labels = created.get("labels") if isinstance(created, dict) else None
+    names = [x.get("name") for x in labels if isinstance(x, dict)] if labels else []
+    if LEASE_LABEL not in names:
+        # GitHub drops the labels of an issue created by a credential without
+        # push access, and says nothing. A strip under that issue would leave a
+        # lease no reconcile reads.
+        raise RuntimeError(
+            f"issue #{number} was created without the {LEASE_LABEL} label; the "
+            "issue credential needs push access to label it. Nothing was "
+            f"stripped; close #{number}"
+        )
     return number
 
 
+def deadline_sentence(host: str, expires_at: datetime) -> str:
+    return f"CI job routing to `{host}` is paused until {format_time(expires_at)}."
+
+
 def write_lease_marker(fleet: Fleet, lease: Lease) -> None:
-    """Replace the marker line in the lease issue, leaving the prose alone."""
+    """Replace the marker line in the lease issue, and the deadline sentence
+    `write_lease` wrote, leaving the rest of the body as it is. A body whose
+    sentence was edited away keeps its edit; the marker is what is read."""
     if lease.issue is None:
         raise ValueError(f"lease for {lease.host} has no issue to update")
     marker = lease_marker(lease)
@@ -291,6 +318,13 @@ def write_lease_marker(fleet: Fleet, lease: Lease) -> None:
             break
     else:
         raise RuntimeError(f"issue #{lease.issue} lost its marker; not updating")
+    prefix = f"CI job routing to `{lease.host}` is paused until "
+    lines = [
+        deadline_sentence(lease.host, lease.expires_at)
+        if line.startswith(prefix)
+        else line
+        for line in lines
+    ]
     issue_api(
         [
             f"repos/{fleet.repo}/issues/{lease.issue}",
@@ -395,21 +429,38 @@ def restore_and_close(fleet: Fleet, lease: Lease, note: str) -> int:
     return 0
 
 
+# What one lease's GitHub calls raise when a call fails or answers in a shape
+# nothing here can read. Caught per lease, so it costs that lease's run.
+LEASE_FAILURES = (RuntimeError, TypeError, ValueError)
+
+
+def reconcile_lease(fleet: Fleet, lease: Lease, now: datetime) -> int:
+    if needs_strip_reconcile(lease, now):
+        return reconcile_active_strip(fleet, lease)
+    if not needs_restore(lease, now):
+        return 0
+    if lease.closed:
+        print(f"{lease.host}: lease closed early")
+        note = "Quiet window ended early; CI routing restored."
+    else:
+        print(f"{lease.host}: window expired {format_time(lease.expires_at)}")
+        note = "Quiet window expired; CI routing restored automatically."
+    return restore_and_close(fleet, lease, note)
+
+
 def reconcile_leases(fleet: Fleet, leases: Sequence[Lease], now: datetime) -> int:
+    """Each lease in turn. A lease whose calls fail is reported and counted,
+    and the rest still run: one stuck issue must not hold every other host's
+    restore back, run after run."""
     failures = 0
     for lease in leases:
-        if needs_strip_reconcile(lease, now):
-            failures += reconcile_active_strip(fleet, lease)
-            continue
-        if not needs_restore(lease, now):
-            continue
-        if lease.closed:
-            print(f"{lease.host}: lease closed early")
-            note = "Quiet window ended early; CI routing restored."
-        else:
-            print(f"{lease.host}: window expired {format_time(lease.expires_at)}")
-            note = "Quiet window expired; CI routing restored automatically."
-        failures += restore_and_close(fleet, lease, note)
+        try:
+            failures += reconcile_lease(fleet, lease, now)
+        except LEASE_FAILURES as error:
+            print(
+                f"FAILED {lease.host} (issue #{lease.issue}): {error}", file=sys.stderr
+            )
+            failures += 1
     return failures
 
 
@@ -426,25 +477,48 @@ def command_reconcile(fleet: Fleet, now: datetime) -> int:
 
 def command_pause(fleet: Fleet, hosts: Sequence[str], now: datetime) -> int:
     failures = command_reconcile(fleet, now)
+    leases, unreadable = tracked_leases(fleet)
     for host in dict.fromkeys(hosts):
-        failures += pause_host(fleet, host, now)
+        failures += pause_host(fleet, host, now, leases, unreadable)
     return failures
 
 
-def pause_host(fleet: Fleet, host: str, now: datetime) -> int:
-    existing = lease_for(fleet, host)
+def pause_host(
+    fleet: Fleet, host: str, now: datetime, leases: Sequence[Lease], unreadable: int
+) -> int:
+    """Open or extend this host's window, from the leases read after the
+    reconcile that `command_pause` runs first.
+
+    A lease that reconcile could not settle - one ended or closed whose
+    restore failed - is refused rather than built on: a new capture would
+    record the partly restored runners, an extension would keep a window over
+    labels that are already back, and the old restore would later route the
+    host mid-window. An unreadable lease is refused the same way, since it
+    could be this host's.
+    """
+    if unreadable:
+        print(
+            f"error: {host}: {unreadable} lease issue(s) will not parse, so "
+            "whether one is this host's cannot be told; repair or restore them "
+            "first",
+            file=sys.stderr,
+        )
+        return 1
+    mine = [lease for lease in leases if lease.host == host]
+    unsettled = [lease for lease in mine if needs_restore(lease, now)]
+    if unsettled:
+        numbers = ", ".join(f"#{lease.issue}" for lease in unsettled)
+        print(
+            f"error: {host}: lease {numbers} still owes its restore; resume "
+            "the host or reconcile until it is restored, then pause",
+            file=sys.stderr,
+        )
+        return 1
+    existing = next(iter(mine), None)
     if existing is not None:
+        # Live, so its window has not reached the cap: the cap bounds the
+        # expiry, and an unexpired expiry lies before it.
         expires_at = window_expiry(now, existing.opened_at)
-        if expires_at <= now:
-            print(
-                f"{host}: the {int(CAP.total_seconds() // 3600)}h cap since "
-                f"{format_time(existing.opened_at)} is spent; "
-                "resuming instead of extending",
-                file=sys.stderr,
-            )
-            return restore_and_close(
-                fleet, existing, "Quiet window hit its cap; CI routing restored."
-            )
         write_lease_marker(fleet, replace(existing, expires_at=expires_at))
         print(f"{host}: quiet extended to {format_time(expires_at)}")
         return 0
@@ -486,10 +560,28 @@ def command_resume(fleet: Fleet, hosts: Sequence[str], now: datetime) -> int:
         if not any(lease.host == host for lease in targets):
             print(f"{host}: no open quiet window; nothing to resume")
     for lease in targets:
-        failures += restore_and_close(
-            fleet, lease, "Quiet window ended; CI routing restored."
-        )
+        try:
+            failures += resume_lease(fleet, lease)
+        except LEASE_FAILURES as error:
+            print(
+                f"FAILED {lease.host} (issue #{lease.issue}): {error}", file=sys.stderr
+            )
+            failures += 1
     return failures + reconcile_leases(fleet, remaining, now)
+
+
+def resume_lease(fleet: Fleet, lease: Lease) -> int:
+    """Close the issue, then restore. A closed issue that keeps its label is
+    the resume request the reconciler honours, so a restore that fails here
+    is retried by the next reconcile rather than waiting for the expiry - or
+    being stripped again if its strip was never confirmed."""
+    if not lease.closed:
+        issue_api(
+            [f"repos/{fleet.repo}/issues/{lease.issue}", "-f", "state=closed"],
+            method="PATCH",
+        )
+        lease = replace(lease, closed=True)
+    return restore_and_close(fleet, lease, "Quiet window ended; CI routing restored.")
 
 
 def command_status(fleet: Fleet, host: str, now: datetime) -> int:
