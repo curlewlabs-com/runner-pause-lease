@@ -48,6 +48,24 @@ class TestCustomLabels(unittest.TestCase):
         self.assertEqual(custom_labels(payload), ("self-hosted", "pool-a"))
 
 
+class TestMalformedLabels(unittest.TestCase):
+    def test_a_labels_field_that_is_not_a_list_of_names_raises(self) -> None:
+        # Read as no labels, it would capture nothing for the runner and let
+        # the strip check count it clean with its labels still on.
+        for payload in (
+            {"labels": None},
+            {"labels": "pool-a"},
+            {"labels": [{"type": "custom"}]},
+            {"labels": ["pool-a"]},
+            "not a runner",
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(TypeError):
+                    custom_labels(payload)
+                with self.assertRaises(TypeError):
+                    carries_label(payload, "host:x")
+
+
 class TestRunnerPayloadsFromPages(unittest.TestCase):
     """The registry read must survive the fleet outgrowing one page."""
 

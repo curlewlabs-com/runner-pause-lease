@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "runner-pause-lease"
-version = "0.1.1"
+version = "0.2.0"
 description = "Pause a self-hosted GitHub Actions runner host for a bounded window, under a lease that restores it by itself."
 readme = "README.md"
 license = "MIT"

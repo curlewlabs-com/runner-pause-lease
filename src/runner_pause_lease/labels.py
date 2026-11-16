@@ -125,33 +125,33 @@ def fetch_runner_payloads(fleet: Fleet) -> list[Any]:
     return runner_payloads_from_pages(document)
 
 
+def label_entries(payload: object) -> list[dict[str, Any]]:
+    """A runner's label objects, or a TypeError when they are not that.
+
+    Read as no labels, a malformed field would capture nothing for the runner
+    and let the strip check count it clean with its labels still on.
+    """
+    labels = payload.get("labels") if isinstance(payload, dict) else None
+    if not isinstance(labels, list):
+        raise TypeError(f"runner without a labels list: {payload!r}")
+    for label in labels:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            raise TypeError(f"runner label without a name: {label!r}")
+    return labels
+
+
 def custom_labels(payload: object) -> tuple[str, ...]:
     """The labels that can be removed and put back, in the order given."""
-    if not isinstance(payload, dict):
-        return ()
-    labels = payload.get("labels")
-    if not isinstance(labels, list):
-        return ()
-    names: list[str] = []
-    for label in labels:
-        if not isinstance(label, dict) or label.get("type") != "custom":
-            continue
-        name = label.get("name")
-        if isinstance(name, str):
-            names.append(name)
-    return tuple(names)
+    return tuple(
+        label["name"]
+        for label in label_entries(payload)
+        if label.get("type") == "custom"
+    )
 
 
 def carries_label(payload: object, wanted: str) -> bool:
     """Whether a runner payload carries exactly this label."""
-    if not isinstance(payload, dict):
-        return False
-    labels = payload.get("labels")
-    if not isinstance(labels, list):
-        return False
-    return any(
-        isinstance(label, dict) and label.get("name") == wanted for label in labels
-    )
+    return any(label["name"] == wanted for label in label_entries(payload))
 
 
 def registered_ids(payloads: Sequence[Any]) -> set[int]:

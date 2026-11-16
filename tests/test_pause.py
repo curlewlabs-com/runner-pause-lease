@@ -183,8 +183,14 @@ class FakeGitHub:
         self.issues: dict[int, dict[str, Any]] = {}
         self.events: list[str] = []
         # Mutations to refuse, named as `events` names them: "lease", "update",
-        # "strip <id> <label>", "restore <id>".
+        # "update <issue>", "comment <issue>", "strip <id> <label>",
+        # "restore <id>".
         self.failing: set[str] = set()
+        # How many issues one page of the listing holds, as `per_page` would.
+        self.page_size = 100
+        # A credential without push access: GitHub creates the issue and
+        # drops its labels without an error.
+        self.drop_labels = False
 
     def refuse(self, event: str) -> None:
         if event in self.failing:
@@ -223,26 +229,37 @@ class FakeGitHub:
         path = arguments[0]
         fields = dict(a.split("=", 1) for a in arguments[1:] if "=" in a)
         if method == "GET":
+            assert "--paginate" in arguments and "--slurp" in arguments
+            listed = [i for i in self.issues.values() if LEASE_LABEL in i["labels"]]
+            size = self.page_size
             return json.dumps(
-                [i for i in self.issues.values() if LEASE_LABEL in i["labels"]]
+                [listed[n : n + size] for n in range(0, len(listed), size)] or [[]]
             )
         if method == "POST" and path.endswith("/issues"):
             self.refuse("lease")
             number = len(self.issues) + 1
+            labels = [] if self.drop_labels else [LEASE_LABEL]
             self.issues[number] = {
                 "number": number,
                 "body": fields["body"],
                 "state": "open",
-                "labels": [LEASE_LABEL],
+                "labels": labels,
             }
             self.events.append(f"lease {number}")
-            return json.dumps({"number": number})
+            return json.dumps(
+                {"number": number, "labels": [{"name": n} for n in labels]}
+            )
         number = int(path.split("/")[4])
         issue = self.issues[number]
+        if method == "POST" and path.endswith("/comments"):
+            self.refuse(f"comment {number}")
+            self.events.append(f"comment {number}")
+            return "{}"
         if method is None:
             return json.dumps(issue)
         if method == "PATCH":
             self.refuse("update")
+            self.refuse(f"update {number}")
             issue.update(fields)
             self.events.append(f"update {number} {sorted(fields)}")
         elif method == "DELETE":
@@ -348,8 +365,7 @@ class TestCommands(unittest.TestCase):
         )
         self.labels(1).append("pool-new")
         self.github.failing.add("update")
-        with self.assertRaises(RuntimeError):
-            pause.command_reconcile(FLEET, NOW)
+        self.assertEqual(pause.command_reconcile(FLEET, NOW), 1)
         self.assertIn("pool-new", self.labels(1))
 
     def test_a_failed_removal_does_not_stop_the_others(self) -> None:
@@ -386,6 +402,86 @@ class TestCommands(unittest.TestCase):
         body = self.github.issues[1]["body"]
         self.assertIn("close this issue", body)
         self.assertNotIn("runner-pause-lease ", body)
+
+    def test_a_lease_created_without_its_label_strips_nothing(self) -> None:
+        # No reconcile would ever read an unlabelled lease, so a strip under it
+        # would strand the host.
+        self.github.drop_labels = True
+        with self.assertRaises(RuntimeError):
+            pause.command_pause(FLEET, ["laptop"], NOW)
+        self.assertFalse(any(e.startswith("strip") for e in self.github.events))
+        self.assertIn("pool-a", self.labels(1))
+
+    def test_a_partly_failed_resume_is_retried_by_the_next_reconcile(self) -> None:
+        # Before the window's expiry, and without stripping what the resume
+        # already put back.
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.failing.add("restore 1")
+        self.assertEqual(pause.command_resume(FLEET, ["laptop"], NOW), 1)
+        self.assertEqual(self.github.issues[1]["state"], "closed")
+        self.assertEqual(self.github.issues[1]["labels"], [LEASE_LABEL])
+        self.assertIn("pool-b", self.labels(2))
+        self.github.failing.clear()
+        self.assertEqual(pause.command_reconcile(FLEET, NOW), 0)
+        self.assertIn("pool-a", self.labels(1))
+        self.assertIn("pool-b", self.labels(2))
+        self.assertEqual(self.github.issues[1]["labels"], [])
+
+    def test_a_pause_refuses_a_host_whose_restore_failed(self) -> None:
+        # A new capture would record the partly restored runners, and the old
+        # lease's restore would route the host in the middle of the new window.
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.failing.add("restore 1")
+        later = NOW + pause.WINDOW
+        self.assertEqual(pause.command_pause(FLEET, ["laptop"], later), 2)
+        self.assertEqual(len(self.github.issues), 1)
+        self.assertEqual(self.github.lease(1).expires_at, NOW + pause.WINDOW)
+
+    def test_a_pause_refuses_a_closed_lease_awaiting_its_restore(self) -> None:
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.issues[1]["state"] = "closed"
+        self.github.failing.add("restore 1")
+        self.assertEqual(pause.command_pause(FLEET, ["laptop"], NOW), 2)
+        self.assertEqual(len(self.github.issues), 1)
+
+    def test_a_pause_refuses_while_any_lease_is_unreadable(self) -> None:
+        # The broken lease could be this host's, already stripped; a capture
+        # now would record nothing to put back.
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.issues[1]["body"] = "<!-- runner-quiet:{broken -->"
+        self.assertEqual(pause.command_pause(FLEET, ["laptop"], NOW), 2)
+        self.assertEqual(len(self.github.issues), 1)
+
+    def test_leases_past_the_first_page_are_reconciled(self) -> None:
+        pause.command_pause(FLEET, ["laptop", "other"], NOW)
+        self.github.page_size = 1
+        self.assertEqual(pause.command_reconcile(FLEET, NOW + pause.WINDOW), 0)
+        self.assertIn("pool-a", self.labels(3))
+        self.assertEqual([i["labels"] for i in self.github.issues.values()], [[], []])
+
+    def test_one_failing_lease_does_not_hold_back_the_rest(self) -> None:
+        pause.command_pause(FLEET, ["laptop", "other"], NOW)
+        self.github.failing.add("comment 1")
+        self.assertEqual(pause.command_reconcile(FLEET, NOW + pause.WINDOW), 1)
+        self.assertEqual(self.github.issues[1]["labels"], [LEASE_LABEL])
+        self.assertIn("pool-a", self.labels(3))
+        self.assertEqual(self.github.issues[2]["labels"], [])
+
+    def test_a_listing_in_an_unexpected_shape_raises(self) -> None:
+        # Read as no leases, it would let every check after it pass.
+        with (
+            mock.patch("runner_pause_lease.pause.issue_api", return_value="{}"),
+            self.assertRaises(TypeError),
+        ):
+            pause.tracked_leases(FLEET)
+
+    def test_an_extension_moves_the_deadline_the_issue_shows(self) -> None:
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        later = NOW + timedelta(hours=1)
+        pause.command_pause(FLEET, ["laptop"], later)
+        body = self.github.issues[1]["body"]
+        self.assertIn("is paused until 2026-08-26T04:30:00Z.", body)
+        self.assertNotIn("2026-08-26T03:30:00Z", body)
 
     def test_a_host_no_runner_names_is_an_error_and_writes_nothing(self) -> None:
         self.assertEqual(pause.command_pause(FLEET, ["nobody"], NOW), 1)
