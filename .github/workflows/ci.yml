@@ -59,15 +59,15 @@ jobs:
         run: python3 -m unittest discover -s tests -t . -v
       - name: The installed command
         # The console script as a user installs it. With no repository it must
-        # refuse with a usage error rather than guess one.
-        env:
-          GITHUB_REPOSITORY: ""
+        # refuse with a usage error rather than guess one. GitHub sets
+        # GITHUB_REPOSITORY for every step and a step's `env:` cannot clear it,
+        # so the command runs under `env -u`.
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install .
           "$RUNNER_TEMP/venv/bin/runner-pause-lease" --help
           set +e
-          "$RUNNER_TEMP/venv/bin/runner-pause-lease" --host-label-prefix host: reconcile
+          env -u GITHUB_REPOSITORY "$RUNNER_TEMP/venv/bin/runner-pause-lease" --host-label-prefix host: reconcile
           status=$?
           set -e
           if [ "$status" -ne 2 ]; then
