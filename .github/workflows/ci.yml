@@ -1,0 +1,76 @@
+name: CI
+
+# Every pull request and push to main runs the checks a contributor runs
+# locally. The weekly run catches what changes outside this repository - the
+# runner images and the python3 and gh they carry - before a user does.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Install the pinned tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: ruff format
+        run: ruff format --check .
+      - name: ruff check
+        run: ruff check .
+      - name: mypy (strict)
+        run: mypy
+
+  test:
+    # The oldest Python the package supports, and the python3 each runner
+    # image ships, on Linux x86_64 and arm64 and on macOS.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            python: "3.12"
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+          - runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: matrix.python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -t . -v
+      - name: The installed command
+        # The console script as a user installs it. With no repository it must
+        # refuse with a usage error rather than guess one.
+        env:
+          GITHUB_REPOSITORY: ""
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install .
+          "$RUNNER_TEMP/venv/bin/runner-pause-lease" --help
+          set +e
+          "$RUNNER_TEMP/venv/bin/runner-pause-lease" --host-label-prefix host: reconcile
+          status=$?
+          set -e
+          if [ "$status" -ne 2 ]; then
+            echo "expected a usage error (2), got $status" >&2
+            exit 1
+          fi

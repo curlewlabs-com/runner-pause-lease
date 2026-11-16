@@ -1,0 +1,42 @@
+[build-system]
+requires = ["flit_core==4.1.0"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "runner-pause-lease"
+version = "0.1.0"
+description = "Pause a self-hosted GitHub Actions runner host for a bounded window, under a lease that restores it by itself."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Curlew Labs" }]
+# The python3 the current Ubuntu hosted runner image ships; the package's
+# __init__ refuses anything older with a message.
+requires-python = ">=3.12"
+# Nothing from PyPI: the package runs on the standard library, plus `gh` on
+# PATH, which makes every GitHub call.
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+runner-pause-lease = "runner_pause_lease.cli:main"
+
+[project.urls]
+Repository = "https://github.com/curlewlabs-com/runner-pause-lease"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]
