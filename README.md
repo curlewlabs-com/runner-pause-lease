@@ -98,7 +98,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh label create ci-quiet --force --repo "$GITHUB_REPOSITORY" --color FBCA04 --description "A runner pause owns this host's routing"
       - name: Install
-        run: pipx install git+https://github.com/curlewlabs-com/runner-pause-lease@v0.1.0
+        run: pipx install git+https://github.com/curlewlabs-com/runner-pause-lease@v0.2.0
       - name: Pause, resume, or reconcile
         env:
           GH_TOKEN: ${{ github.token }}
