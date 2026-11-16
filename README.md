@@ -223,13 +223,15 @@ runner instead.
 
 ## Known issues
 
-Each of these needs a GitHub call to fail, or a setup outside the one above.
-When one happens, the run that hits it exits non-zero.
+Each of these needs a GitHub call to fail, a lease issue edited by hand, or a
+setup outside the one above. Two of them end in a run that reports success, so
+a green run is not proof that every host is back; those two say so.
 
 - **An issue credential that cannot set labels.** GitHub creates an issue
   without its labels, and without an error, when the credential creating it
   lacks push access. The pause then strips the host under a lease no reconcile
-  can find. The workflow token in the example can set labels.
+  can find, and every run still succeeds. The workflow token in the example can
+  set labels.
 - **A resume whose restore partly fails.** The lease stays open with its
   original expiry. A later reconcile does not retry the restore until that
   expiry, and if the strip was never confirmed, it strips the runners the
@@ -239,7 +241,14 @@ When one happens, the run that hits it exits non-zero.
   extend the ended lease, and the older lease's later restore can make the
   host routable during the new window.
 - **More than 100 leases.** Only the first page of labelled issues is read, so
-  leases beyond it are not reconciled.
+  leases beyond it are not reconciled, and the run still succeeds.
+- **A lease marker edited into something unreadable.** `reconcile` and
+  `status` report it and exit non-zero, but a pause of that host goes ahead:
+  it captures the host's runners as they are, stripped, so its own restore
+  puts back nothing the broken lease held. A reply from the issues endpoint
+  that is not a list of issues is read as no leases at all.
+- **An extended window's issue text keeps the first deadline.** The hidden
+  marker, which the reconciler reads, has the new one.
 - **One lease failing stops the rest.** An error writing or closing one lease
   issue ends that reconcile before it reaches the leases after it, and a
   failure that persists does so on every run.
