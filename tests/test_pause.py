@@ -379,15 +379,13 @@ class TestCommands(unittest.TestCase):
         self.assertIn("pool-a", self.labels(1))
         self.assertEqual(self.github.issues[1]["labels"], [])
 
-    def test_the_lease_names_a_resume_that_runs_as_written(self) -> None:
-        # Pasting it must reach the same fleet, keep prefixes included: a
-        # resume also reconciles other hosts' leases.
+    def test_the_lease_offers_closing_it_and_no_command(self) -> None:
+        # A command pasted from the issue would run outside the lock the
+        # README asks callers to hold; closing it is acted on by a reconcile.
         pause.command_pause(FLEET, ["laptop"], NOW)
-        self.assertIn(
-            "`runner-pause-lease --repo owner/name --host-label-prefix host: "
-            "--keep-label-prefix vm: resume --host laptop`",
-            self.github.issues[1]["body"],
-        )
+        body = self.github.issues[1]["body"]
+        self.assertIn("close this issue", body)
+        self.assertNotIn("runner-pause-lease ", body)
 
     def test_a_host_no_runner_names_is_an_error_and_writes_nothing(self) -> None:
         self.assertEqual(pause.command_pause(FLEET, ["nobody"], NOW), 1)
