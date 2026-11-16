@@ -133,9 +133,10 @@ runner-pause-lease --repo OWNER/NAME --host-label-prefix host: reconcile
 ### Commands
 
 - **`pause --host H...`** reconciles first, then pauses each host for four
-  hours. Pausing a host that is already paused extends its window, up to
-  twelve hours from when it first opened. Past that cap, a pause restores the
-  host instead.
+  hours. Pausing a host that is already paused extends its window, but never
+  past twelve hours from when that window first opened. A pause after a
+  window ends, whether by expiry or by the cap, restores the host and opens a
+  new window.
 - **`resume --host H...`** restores the named hosts now, then reconciles the
   rest.
 - **`status --host H`** exits 3 while the host is inside a live window. When
@@ -219,6 +220,29 @@ runner instead.
   exit non-zero, rather than skipping it.
 - **It does not serialize itself.** Run every invocation under one concurrency
   group, as in the workflow above, or hold your own lock around it.
+
+## Known issues
+
+Each of these needs a GitHub call to fail, or a setup outside the one above.
+When one happens, the run that hits it exits non-zero.
+
+- **An issue credential that cannot set labels.** GitHub creates an issue
+  without its labels, and without an error, when the credential creating it
+  lacks push access. The pause then strips the host under a lease no reconcile
+  can find. The workflow token in the example can set labels.
+- **A resume whose restore partly fails.** The lease stays open with its
+  original expiry. A later reconcile does not retry the restore until that
+  expiry, and if the strip was never confirmed, it strips the runners the
+  resume had put back.
+- **A pause of a host whose last restore failed.** The pause does not wait for
+  that restore to succeed. It can capture the partly restored runners, or
+  extend the ended lease, and the older lease's later restore can make the
+  host routable during the new window.
+- **More than 100 leases.** Only the first page of labelled issues is read, so
+  leases beyond it are not reconciled.
+- **One lease failing stops the rest.** An error writing or closing one lease
+  issue ends that reconcile before it reaches the leases after it, and a
+  failure that persists does so on every run.
 
 ## Requirements
 

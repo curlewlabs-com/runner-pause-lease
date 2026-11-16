@@ -105,7 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         admin_token=os.environ.get("RUNNER_ADMIN_TOKEN") or None,
     )
     handler: Handler = arguments.handler
-    return handler(fleet, arguments, datetime.now(UTC))
+    result = handler(fleet, arguments, datetime.now(UTC))
+    if arguments.command == "status":
+        return result
+    # The commands return how many things failed. A process exit status is
+    # taken modulo 256, so a count passed through could read as success.
+    return 1 if result else 0
 
 
 if __name__ == "__main__":

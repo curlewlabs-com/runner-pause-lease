@@ -28,6 +28,7 @@ it, and tests need no clock.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from collections.abc import Collection, Sequence
@@ -229,6 +230,21 @@ def lease_for(fleet: Fleet, host: str) -> Lease | None:
     return None
 
 
+def resume_command(fleet: Fleet, host: str) -> str:
+    """The command that ends this host's pause, runnable as written.
+
+    It carries every fleet option, the keep prefixes included: a resume also
+    reconciles the other leases, and without them it would strip labels the
+    pause was told to keep.
+    """
+    words = ["runner-pause-lease", "--repo", fleet.repo]
+    words += ["--host-label-prefix", fleet.host_label_prefix]
+    for prefix in fleet.keep_label_prefixes:
+        words += ["--keep-label-prefix", prefix]
+    words += ["resume", "--host", host]
+    return shlex.join(words)
+
+
 def write_lease(fleet: Fleet, lease: Lease) -> int:
     """Open the lease issue and return its number. Called BEFORE any strip."""
     marker = lease_marker(lease)
@@ -241,7 +257,7 @@ def write_lease(fleet: Fleet, lease: Lease) -> int:
         "Jobs already running when the window opened were left alone and drain "
         "normally. At expiry the next reconcile restores the labels and closes "
         "this issue. To end it early, close this issue, or run "
-        f"`runner-pause-lease resume --host {lease.host}`.\n\n"
+        f"`{resume_command(fleet, lease.host)}`.\n\n"
         "The marker above is the only record of what this host's runners "
         "carried. The reconciler retries any incomplete strip, then uses it to "
         "restore routing when the window ends."

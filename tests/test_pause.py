@@ -182,6 +182,13 @@ class FakeGitHub:
         self.runners = runners
         self.issues: dict[int, dict[str, Any]] = {}
         self.events: list[str] = []
+        # Mutations to refuse, named as `events` names them: "lease", "update",
+        # "strip <id> <label>", "restore <id>".
+        self.failing: set[str] = set()
+
+    def refuse(self, event: str) -> None:
+        if event in self.failing:
+            raise RuntimeError(f"gh api: refused {event}")
 
     def gh_api(self, arguments: list[str], token: str | None = None) -> str:
         if arguments[0].startswith("repos/owner/name/actions/runners?"):
@@ -198,9 +205,11 @@ class FakeGitHub:
         rid = int(path.split("/")[5])
         if method == "DELETE":
             label = path.split("/")[-1].replace("%3A", ":")
+            self.refuse(f"strip {rid} {label}")
             self.runners[rid][1].remove(label)
             self.events.append(f"strip {rid} {label}")
             return ""
+        self.refuse(f"restore {rid}")
         added = [a.split("=", 1)[1] for a in arguments[3:] if a != "-f"]
         for label in added:
             if label not in self.runners[rid][1]:
@@ -218,6 +227,7 @@ class FakeGitHub:
                 [i for i in self.issues.values() if LEASE_LABEL in i["labels"]]
             )
         if method == "POST" and path.endswith("/issues"):
+            self.refuse("lease")
             number = len(self.issues) + 1
             self.issues[number] = {
                 "number": number,
@@ -232,6 +242,7 @@ class FakeGitHub:
         if method is None:
             return json.dumps(issue)
         if method == "PATCH":
+            self.refuse("update")
             issue.update(fields)
             self.events.append(f"update {number} {sorted(fields)}")
         elif method == "DELETE":
@@ -320,6 +331,63 @@ class TestCommands(unittest.TestCase):
         self.assertIn("pool-new", self.github.lease(1).runners[0].custom_labels)
         pause.command_resume(FLEET, ["laptop"], NOW)
         self.assertIn("pool-new", self.labels(1))
+
+    def test_a_lease_that_cannot_be_written_strips_nothing(self) -> None:
+        self.github.failing.add("lease")
+        with self.assertRaises(RuntimeError):
+            pause.command_pause(FLEET, ["laptop"], NOW)
+        self.assertEqual(self.labels(1), ["pool-a", "self-hosted", "host:laptop"])
+        self.assertFalse(any(e.startswith("strip") for e in self.github.events))
+
+    def test_a_capture_that_cannot_grow_strips_nothing_new(self) -> None:
+        # The label a retry found is removed only once the lease records it,
+        # or the restore would never put it back.
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.issues[1]["body"] = self.github.issues[1]["body"].replace(
+            '"strip_confirmed":true', '"strip_confirmed":false'
+        )
+        self.labels(1).append("pool-new")
+        self.github.failing.add("update")
+        with self.assertRaises(RuntimeError):
+            pause.command_reconcile(FLEET, NOW)
+        self.assertIn("pool-new", self.labels(1))
+
+    def test_a_failed_removal_does_not_stop_the_others(self) -> None:
+        self.github.failing.add("strip 1 pool-a")
+        self.assertEqual(pause.command_pause(FLEET, ["laptop"], NOW), 1)
+        self.assertEqual(self.labels(1), ["pool-a", "host:laptop"])
+        self.assertEqual(self.labels(2), ["host:laptop", "vm:laptop-1"])
+        # The next reconcile finishes the strip; only a pass that starts out
+        # clean confirms it.
+        self.github.failing.clear()
+        self.assertEqual(pause.command_reconcile(FLEET, NOW), 0)
+        self.assertEqual(self.labels(1), ["host:laptop"])
+        self.assertFalse(self.github.lease(1).strip_confirmed)
+        self.assertEqual(pause.command_reconcile(FLEET, NOW), 0)
+        self.assertTrue(self.github.lease(1).strip_confirmed)
+
+    def test_a_failed_restore_keeps_the_lease_and_restores_the_rest(self) -> None:
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.github.failing.add("restore 1")
+        self.assertEqual(pause.command_reconcile(FLEET, NOW + pause.WINDOW), 1)
+        self.assertEqual(self.labels(1), ["host:laptop"])
+        self.assertIn("pool-b", self.labels(2))
+        self.assertEqual(self.github.issues[1]["labels"], [LEASE_LABEL])
+        # A later reconcile retries the whole set and then releases the lease.
+        self.github.failing.clear()
+        self.assertEqual(pause.command_reconcile(FLEET, NOW + pause.WINDOW), 0)
+        self.assertIn("pool-a", self.labels(1))
+        self.assertEqual(self.github.issues[1]["labels"], [])
+
+    def test_the_lease_names_a_resume_that_runs_as_written(self) -> None:
+        # Pasting it must reach the same fleet, keep prefixes included: a
+        # resume also reconciles other hosts' leases.
+        pause.command_pause(FLEET, ["laptop"], NOW)
+        self.assertIn(
+            "`runner-pause-lease --repo owner/name --host-label-prefix host: "
+            "--keep-label-prefix vm: resume --host laptop`",
+            self.github.issues[1]["body"],
+        )
 
     def test_a_host_no_runner_names_is_an_error_and_writes_nothing(self) -> None:
         self.assertEqual(pause.command_pause(FLEET, ["nobody"], NOW), 1)
