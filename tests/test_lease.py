@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -141,6 +142,36 @@ class TestLeaseRoundTrip(unittest.TestCase):
                 f'"expires_at":"2026-08-25T04:00:00Z"}}{leases.MARKER_SUFFIX}'
             )
         )
+
+    def test_a_runner_entry_that_cannot_be_restored_reads_as_no_lease(self) -> None:
+        # A partial capture would restore a partial label set, so one entry
+        # that is not exactly an id, a name and a list of label names voids
+        # the whole lease.
+        good = {"id": 1, "name": "a", "custom": ["x"]}
+        bad_entries: list[object] = [
+            "not an object",
+            {"id": "1", "name": "a", "custom": []},
+            {"id": 1, "name": 2, "custom": []},
+            {"id": 1, "name": "a", "custom": "x"},
+            {"id": 1, "name": "a", "custom": ["x", 3]},
+            {"id": 1, "name": "a"},
+        ]
+        for bad in bad_entries:
+            with self.subTest(entry=bad):
+                marker = json.dumps(
+                    {
+                        "host": "h",
+                        "opened_at": "2026-08-25T00:00:00Z",
+                        "expires_at": "2026-08-25T04:00:00Z",
+                        "runners": [good, bad],
+                    },
+                    separators=(",", ":"),
+                )
+                self.assertIsNone(
+                    leases.lease_from_body(
+                        f"{leases.MARKER_PREFIX}{marker}{leases.MARKER_SUFFIX}"
+                    )
+                )
 
     def test_an_instant_written_in_another_zone_normalises(self) -> None:
         # +13:00 puts this instant on the next calendar day, which is where a

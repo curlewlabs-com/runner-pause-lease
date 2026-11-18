@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
+from .decoded import as_dict, as_list, as_str_list
 from .labels import Runner
 
 # Only a successful restore removes it, so it marks an active pause, a strip
@@ -117,9 +118,10 @@ def lease_from_body(body: str, issue: int | None = None) -> Lease | None:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             return None
-        if not isinstance(payload, dict):
+        fields = as_dict(payload)
+        if fields is None:
             return None
-        return _lease_from_payload(payload, issue)
+        return _lease_from_payload(fields, issue)
     return None
 
 
@@ -130,8 +132,8 @@ def _lease_from_payload(payload: dict[str, Any], issue: int | None) -> Lease | N
     # Absent in a marker written before strip confirmation existed; such a
     # lease still owes one clean observation.
     strip_confirmed = payload.get("strip_confirmed", False)
-    entries = payload.get("runners")
-    if not isinstance(host, str) or not isinstance(entries, list):
+    entries = as_list(payload.get("runners"))
+    if not isinstance(host, str) or entries is None:
         return None
     if not isinstance(opened, str) or not isinstance(expires, str):
         return None
@@ -139,16 +141,17 @@ def _lease_from_payload(payload: dict[str, Any], issue: int | None) -> Lease | N
         return None
     runners: list[Runner] = []
     for entry in entries:
-        if not isinstance(entry, dict):
+        fields = as_dict(entry)
+        if fields is None:
             return None
         identifier, name, custom = (
-            entry.get("id"),
-            entry.get("name"),
-            entry.get("custom"),
+            fields.get("id"),
+            fields.get("name"),
+            as_str_list(fields.get("custom")),
         )
         if not isinstance(identifier, int) or not isinstance(name, str):
             return None
-        if not isinstance(custom, list) or not all(isinstance(c, str) for c in custom):
+        if custom is None:
             return None
         runners.append(
             Runner(identifier=identifier, name=name, custom_labels=tuple(custom))

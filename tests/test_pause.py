@@ -475,6 +475,38 @@ class TestCommands(unittest.TestCase):
         ):
             pause.tracked_leases(FLEET)
 
+    def test_entries_that_are_not_readable_issues_are_counted_not_skipped(self) -> None:
+        # An entry that cannot be read is a lease that may exist, so it must
+        # surface as unreadable rather than as no lease.
+        listing = [[3, {"number": "x", "body": "b"}, {"number": 4, "body": None}]]
+        with mock.patch(
+            "runner_pause_lease.pause.issue_api", return_value=json.dumps(listing)
+        ):
+            self.assertEqual(pause.tracked_leases(FLEET), ([], 3))
+
+    def test_a_listing_whose_pages_are_not_lists_raises(self) -> None:
+        listings: list[object] = [[{"number": 1}], "x", [[], 3]]
+        for listing in listings:
+            with (
+                self.subTest(listing=listing),
+                mock.patch(
+                    "runner_pause_lease.pause.issue_api",
+                    return_value=json.dumps(listing),
+                ),
+                self.assertRaises(TypeError),
+            ):
+                pause.tracked_leases(FLEET)
+
+    def test_a_create_answer_without_a_number_strips_nothing(self) -> None:
+        for answer in ("[]", "{}", '{"number": "1"}'):
+            with (
+                self.subTest(answer=answer),
+                mock.patch("runner_pause_lease.pause.issue_api", return_value=answer),
+                self.assertRaises(TypeError),
+            ):
+                pause.command_pause(FLEET, ["laptop"], NOW)
+        self.assertFalse(any(e.startswith("strip") for e in self.github.events))
+
     def test_an_extension_moves_the_deadline_the_issue_shows(self) -> None:
         pause.command_pause(FLEET, ["laptop"], NOW)
         later = NOW + timedelta(hours=1)
