@@ -153,12 +153,12 @@ restores the host.
 
 ### Options
 
-| option | default | why it exists |
-|---|---|---|
-| `--repo OWNER/NAME` | `$GITHUB_REPOSITORY` | The repository whose runners and issues to use. |
-| `--host-label-prefix P` | none; required | How your runners name their host. A host is every runner carrying `P<host>`, and those labels are never removed. |
-| `--keep-label-prefix Q` | none | Repeatable. A pause has to remove every label a workflow could select on, and it cannot see your workflows, so it removes every custom label except the host label. If your runners carry a label that identifies them and routes no job, such as a VM name an inventory tool reads, name its prefix here, or a pause removes it too. |
-| `RUNNER_ADMIN_TOKEN` (environment) | the `gh` login | The credential for the runner label calls; see above. |
+| option                             | default              | why it exists                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--repo OWNER/NAME`                | `$GITHUB_REPOSITORY` | The repository whose runners and issues to use.                                                                                                                                                                                                                                                                                       |
+| `--host-label-prefix P`            | none; required       | How your runners name their host. A host is every runner carrying `P<host>`, and those labels are never removed.                                                                                                                                                                                                                      |
+| `--keep-label-prefix Q`            | none                 | Repeatable. A pause has to remove every label a workflow could select on, and it cannot see your workflows, so it removes every custom label except the host label. If your runners carry a label that identifies them and routes no job, such as a VM name an inventory tool reads, name its prefix here, or a pause removes it too. |
+| `RUNNER_ADMIN_TOKEN` (environment) | the `gh` login       | The credential for the runner label calls; see above.                                                                                                                                                                                                                                                                                 |
 
 The window (four hours), the cap (twelve hours) and the lease label
 (`ci-quiet`) are fixed.
