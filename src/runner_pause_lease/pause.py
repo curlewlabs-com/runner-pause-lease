@@ -35,6 +35,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+from .decoded import as_dict, as_list
 from .labels import (
     Fleet,
     Runner,
@@ -202,12 +203,14 @@ def tracked_leases(fleet: Fleet) -> tuple[list[Lease], int]:
             method="GET",
         )
     )
-    if not isinstance(pages, list) or not all(isinstance(p, list) for p in pages):
+    issue_pages = as_list(pages)
+    if issue_pages is None or not all(isinstance(p, list) for p in issue_pages):
         raise TypeError("unexpected shape from the issues endpoint: not issue pages")
     leases: list[Lease] = []
     unreadable = 0
-    for entry in (entry for page in pages for entry in page):
-        if not isinstance(entry, dict):
+    for listed in (entry for page in issue_pages for entry in page):
+        entry = as_dict(listed)
+        if entry is None:
             print("a lease issue entry is not an object", file=sys.stderr)
             unreadable += 1
             continue
@@ -275,11 +278,16 @@ def write_lease(fleet: Fleet, lease: Lease) -> int:
             method="POST",
         )
     )
-    number = created.get("number") if isinstance(created, dict) else None
+    created_fields = as_dict(created)
+    number = created_fields.get("number") if created_fields is not None else None
     if not isinstance(number, int):
         raise TypeError("issue create returned no number; nothing was stripped")
-    labels = created.get("labels") if isinstance(created, dict) else None
-    names = [x.get("name") for x in labels if isinstance(x, dict)] if labels else []
+    labels = created_fields.get("labels") if created_fields is not None else None
+    names = (
+        [x_fields.get("name") for x in labels if (x_fields := as_dict(x)) is not None]
+        if labels
+        else []
+    )
     if LEASE_LABEL not in names:
         # GitHub drops the labels of an issue created by a credential without
         # push access, and says nothing. A strip under that issue would leave a
@@ -308,7 +316,8 @@ def write_lease_marker(fleet: Fleet, lease: Lease) -> None:
     current = json.loads(
         issue_api([f"repos/{fleet.repo}/issues/{lease.issue}", "--jq", "."])
     )
-    body = current.get("body") if isinstance(current, dict) else None
+    current_fields = as_dict(current)
+    body = current_fields.get("body") if current_fields is not None else None
     if not isinstance(body, str):
         raise TypeError(f"issue #{lease.issue} has no body to update")
     lines = body.splitlines()

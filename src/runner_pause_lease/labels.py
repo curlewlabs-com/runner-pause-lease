@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+from .decoded import as_dict, as_list
+
 
 @dataclass(frozen=True)
 class Fleet:
@@ -92,12 +94,16 @@ def runner_payloads_from_pages(document: object) -> list[Any]:
     array, raises rather than reading as an empty fleet: an empty read is what
     would let a lease close without restoring anything.
     """
-    if not isinstance(document, list):
+    pages = as_list(document)
+    if pages is None:
         raise TypeError("unexpected shape from the runners endpoint: not a page list")
     runners: list[Any] = []
-    for page in document:
-        page_runners = page.get("runners") if isinstance(page, dict) else None
-        if not isinstance(page_runners, list):
+    for page in pages:
+        page_fields = as_dict(page)
+        page_runners = (
+            as_list(page_fields.get("runners")) if page_fields is not None else None
+        )
+        if page_runners is None:
             raise TypeError(
                 "unexpected shape from the runners endpoint: page lacks runners"
             )
@@ -131,13 +137,17 @@ def label_entries(payload: object) -> list[dict[str, Any]]:
     Read as no labels, a malformed field would capture nothing for the runner
     and let the strip check count it clean with its labels still on.
     """
-    labels = payload.get("labels") if isinstance(payload, dict) else None
-    if not isinstance(labels, list):
+    fields = as_dict(payload)
+    labels = as_list(fields.get("labels")) if fields is not None else None
+    if labels is None:
         raise TypeError(f"runner without a labels list: {payload!r}")
+    entries: list[dict[str, Any]] = []
     for label in labels:
-        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+        entry = as_dict(label)
+        if entry is None or not isinstance(entry.get("name"), str):
             raise TypeError(f"runner label without a name: {label!r}")
-    return labels
+        entries.append(entry)
+    return entries
 
 
 def custom_labels(payload: object) -> tuple[str, ...]:
@@ -164,7 +174,8 @@ def registered_ids(payloads: Sequence[Any]) -> set[int]:
     """
     ids: set[int] = set()
     for payload in payloads:
-        identifier = payload.get("id") if isinstance(payload, dict) else None
+        fields = as_dict(payload)
+        identifier = fields.get("id") if fields is not None else None
         if not isinstance(identifier, int):
             raise TypeError(f"runner without a usable id: {payload!r}")
         ids.add(identifier)
